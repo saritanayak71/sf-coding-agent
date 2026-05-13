@@ -1,10 +1,11 @@
 """
 Salesforce connectivity layer.
-Uses OAuth 2.0 Username-Password flow — works with SDO orgs where SOAP login is disabled.
+Uses OAuth 2.0 Username-Password flow with detailed error logging.
 """
 
 import urllib.request
 import urllib.parse
+import urllib.error
 import json
 from typing import List, Dict, Any
 
@@ -32,9 +33,8 @@ class SalesforceClient:
                  instance_url: str, consumer_key: str, consumer_secret: str):
 
         instance_url = instance_url.rstrip("/")
+        token_url    = f"{instance_url}/services/oauth2/token"
 
-        # OAuth 2.0 Username-Password flow
-        token_url = f"{instance_url}/services/oauth2/token"
         params = urllib.parse.urlencode({
             "grant_type":    "password",
             "client_id":     consumer_key,
@@ -43,20 +43,40 @@ class SalesforceClient:
             "password":      password + security_token,
         }).encode("utf-8")
 
-        req = urllib.request.Request(token_url, data=params, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            token_data = json.loads(resp.read().decode("utf-8"))
+        req = urllib.request.Request(
+            token_url,
+            data    = params,
+            method  = "POST",
+            headers = {"Content-Type": "application/x-www-form-urlencoded"},
+        )
 
-        self.access_token  = token_data["access_token"]
-        self.instance_url  = token_data["instance_url"]
-        self.api_version   = "62.0"
-        self.base_url      = f"{self.instance_url}/services/data/v{self.api_version}"
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                token_data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            # Read the full error body from Salesforce — this tells us exactly what's wrong
+            error_body = e.read().decode("utf-8")
+            try:
+                error_json = json.loads(error_body)
+                error_code = error_json.get("error", "unknown")
+                error_desc = error_json.get("error_description", error_body)
+                raise Exception(f"OAuth failed [{error_code}]: {error_desc}")
+            except (json.JSONDecodeError, KeyError):
+                raise Exception(f"OAuth failed [HTTP {e.code}]: {error_body}")
+
+        self.access_token = token_data["access_token"]
+        self.instance_url = token_data["instance_url"]
+        self.api_version  = "62.0"
+        self.base_url     = f"{self.instance_url}/services/data/v{self.api_version}"
 
     def _get(self, path: str) -> dict:
         url = f"{self.base_url}{path}"
         req = urllib.request.Request(
             url,
-            headers={"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type":  "application/json",
+            },
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
