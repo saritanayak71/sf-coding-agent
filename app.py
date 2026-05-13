@@ -103,7 +103,10 @@ else:
         else:
             with st.spinner("Connecting..."):
                 try:
-                    client  = SalesforceClient(sf_username, sf_password, sf_token, sf_instance)
+                     client = SalesforceClient(
+                        sf_username, sf_password, sf_token,
+                        sf_instance, sf_consumer_key, sf_consumer_secret
+                    )
                     objects = client.get_sobject_list()
                     st.session_state.sf_client    = client
                     st.session_state.sobjects     = objects
