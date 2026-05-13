@@ -1,9 +1,8 @@
 import streamlit as st
-from salesforce_client import get_sf_connection, get_sobject_list, get_object_schema, format_schema_for_prompt
-from rag_engine import retrieve_best_practices
-from code_generator import generate_apex_code, parse_code_sections
+from salesforce_client import SalesforceClient
+from rag_engine import RAGEngine
+from code_generator import CodeGenerator
 
-# ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="SF Coding Agent",
     page_icon="⚡",
@@ -11,369 +10,219 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;600;800&display=swap');
 :root {
-    --bg: #0a0e1a;
-    --surface: #111827;
-    --surface2: #1a2236;
-    --border: #1e2d45;
-    --accent: #00d4ff;
-    --accent2: #7c3aed;
-    --text: #e2e8f0;
-    --muted: #64748b;
-    --success: #10b981;
-    --mono: 'IBM Plex Mono', monospace;
-    --sans: 'IBM Plex Sans', sans-serif;
+    --bg: #0a0e1a; --surface: #111827; --border: #1e2d40;
+    --accent: #00d4ff; --accent2: #7c3aed; --text: #e2e8f0;
+    --muted: #64748b; --success: #10b981;
 }
-
-html, body, [class*="css"] {
-    font-family: var(--sans);
-    background-color: var(--bg);
-    color: var(--text);
+html, body, [data-testid="stAppViewContainer"] {
+    background: var(--bg) !important; color: var(--text) !important;
+    font-family: 'Syne', sans-serif !important;
 }
-
-.main .block-container { padding: 2rem 3rem; max-width: 1400px; }
-
-/* Header */
-.agent-header {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    padding: 1.5rem 0 2rem 0;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 2rem;
+[data-testid="stAppViewContainer"] {
+    background: radial-gradient(ellipse 80% 50% at 20% -10%, rgba(0,212,255,0.07) 0%, transparent 60%),
+                radial-gradient(ellipse 60% 40% at 80% 110%, rgba(124,58,237,0.07) 0%, transparent 60%),
+                var(--bg) !important;
 }
-.agent-title {
-    font-family: var(--mono);
-    font-size: 1.6rem;
-    font-weight: 600;
-    color: var(--accent);
-    letter-spacing: -0.02em;
+[data-testid="stHeader"] { background: transparent !important; }
+h1,h2,h3 { font-family: 'Syne', sans-serif !important; font-weight: 800 !important; }
+.hero-title {
+    font-family: 'Syne', sans-serif; font-size: 2.4rem; font-weight: 800;
+    background: linear-gradient(135deg, #00d4ff 0%, #7c3aed 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text; margin-bottom: 0.2rem; line-height: 1.1;
 }
-.agent-subtitle {
-    font-size: 0.85rem;
-    color: var(--muted);
-    margin-top: 0.2rem;
-}
-.status-dot {
-    width: 10px; height: 10px;
-    border-radius: 50%;
-    background: var(--success);
-    box-shadow: 0 0 8px var(--success);
-    animation: pulse 2s infinite;
-}
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-}
-
-/* Step labels */
+.hero-sub { color: var(--muted); font-size: 0.9rem; font-family: 'JetBrains Mono', monospace; margin-bottom: 1.5rem; }
 .step-label {
-    font-family: var(--mono);
-    font-size: 0.7rem;
-    color: var(--accent);
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    margin-bottom: 0.4rem;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--accent);
+    letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 0.4rem;
 }
-
-/* Panels */
-.panel {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 1.5rem;
-    margin-bottom: 1.5rem;
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.2rem 1.4rem; margin-bottom: 1rem; border-left: 3px solid var(--accent); }
+.warning-box {
+    background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.25);
+    border-radius: 8px; padding: 0.7rem 1rem; font-size: 0.82rem; color: #fcd34d;
+    font-family: 'JetBrains Mono', monospace; margin-bottom: 1rem;
 }
-
-/* Code tabs */
-.code-header {
-    font-family: var(--mono);
-    font-size: 0.75rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    padding: 0.5rem 1rem;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-bottom: none;
-    border-radius: 6px 6px 0 0;
-    display: inline-block;
-}
-
-/* Schema display */
-.schema-chip {
-    display: inline-block;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 0.2rem 0.6rem;
-    font-family: var(--mono);
-    font-size: 0.75rem;
-    color: var(--accent);
-    margin: 0.15rem;
-}
-
-/* Streamlit overrides */
 .stTextArea textarea {
-    background: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
-    color: var(--text) !important;
-    font-family: var(--sans) !important;
-    font-size: 0.9rem !important;
+    background: #0d1525 !important; border: 1px solid var(--border) !important;
+    border-radius: 8px !important; color: var(--text) !important;
+    font-family: 'JetBrains Mono', monospace !important; font-size: 0.88rem !important;
 }
-.stTextArea textarea:focus {
-    border-color: var(--accent) !important;
-    box-shadow: 0 0 0 1px var(--accent) !important;
-}
-.stSelectbox > div > div {
-    background: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    color: var(--text) !important;
-}
+.stTextArea textarea:focus { border-color: var(--accent) !important; }
+.stSelectbox > div > div { background: #0d1525 !important; border: 1px solid var(--border) !important; border-radius: 8px !important; color: var(--text) !important; }
 .stButton > button {
-    background: var(--accent) !important;
-    color: #0a0e1a !important;
-    border: none !important;
-    font-family: var(--mono) !important;
-    font-weight: 600 !important;
-    font-size: 0.85rem !important;
-    letter-spacing: 0.05em !important;
-    padding: 0.6rem 2rem !important;
-    border-radius: 4px !important;
-    transition: all 0.2s !important;
+    background: linear-gradient(135deg, #00d4ff, #7c3aed) !important; color: white !important;
+    border: none !important; border-radius: 8px !important; font-family: 'Syne', sans-serif !important;
+    font-weight: 700 !important; font-size: 0.9rem !important; padding: 0.6rem 1.8rem !important;
 }
-.stButton > button:hover {
-    background: #00b8e0 !important;
-    transform: translateY(-1px) !important;
-}
-.stTabs [data-baseweb="tab-list"] {
-    background: var(--surface2) !important;
-    border-radius: 6px 6px 0 0 !important;
-    gap: 0 !important;
-}
-.stTabs [data-baseweb="tab"] {
-    background: transparent !important;
-    color: var(--muted) !important;
-    font-family: var(--mono) !important;
-    font-size: 0.8rem !important;
-}
-.stTabs [aria-selected="true"] {
-    color: var(--accent) !important;
-    border-bottom: 2px solid var(--accent) !important;
-}
-.stCodeBlock { border-radius: 0 0 6px 6px !important; }
-div[data-testid="stExpander"] {
-    background: var(--surface2) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
-}
-.stInfo { background: rgba(0, 212, 255, 0.08) !important; border-left: 3px solid var(--accent) !important; }
-.stSuccess { background: rgba(16, 185, 129, 0.08) !important; border-left: 3px solid var(--success) !important; }
-.stSpinner > div { border-top-color: var(--accent) !important; }
+.stTabs [data-baseweb="tab-list"] { background: transparent !important; border-bottom: 1px solid var(--border) !important; }
+.stTabs [data-baseweb="tab"] { background: transparent !important; color: var(--muted) !important; font-family: 'JetBrains Mono', monospace !important; font-size: 0.8rem !important; }
+.stTabs [aria-selected="true"] { color: var(--accent) !important; border-bottom: 2px solid var(--accent) !important; }
+hr { border-color: var(--border) !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Header ────────────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="agent-header">
-    <div class="status-dot"></div>
-    <div>
-        <div class="agent-title">⚡ SF Coding Agent</div>
-        <div class="agent-subtitle">Salesforce-aware Apex generator · Trigger + Handler + Test Class</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+# Session state
+for key, default in {
+    "sf_connected": False, "sf_client": None, "rag_ready": False,
+    "rag_engine": None, "sobjects": [], "selected_object": None,
+    "schema": None, "generated": None,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
-# ── Session state ─────────────────────────────────────────────────────────────
-if "sf" not in st.session_state:
-    st.session_state.sf = None
-if "sobjects" not in st.session_state:
-    st.session_state.sobjects = []
-if "schema" not in st.session_state:
-    st.session_state.schema = None
-if "generated" not in st.session_state:
-    st.session_state.generated = None
+# Header
+st.markdown('<div class="hero-title">⚡ SF Coding Agent</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-sub">requirement → apex trigger · handler · test class</div>', unsafe_allow_html=True)
+st.markdown('<div class="warning-box">⚠️ Internal use only — do not enter client org credentials or client-specific data.</div>', unsafe_allow_html=True)
+st.markdown('<hr>', unsafe_allow_html=True)
 
-# ── Layout ────────────────────────────────────────────────────────────────────
-left_col, right_col = st.columns([1, 1.6], gap="large")
+# ── STEP 1: CONNECT ───────────────────────────────────────────────────────────
+st.markdown('<div class="step-label">Step 01 — Connect to Salesforce</div>', unsafe_allow_html=True)
+st.markdown('<div class="card">', unsafe_allow_html=True)
 
-with left_col:
-    # ── Step 1: Connect ───────────────────────────────────────────────────────
-    st.markdown('<div class="step-label">Step 1 · Connect</div>', unsafe_allow_html=True)
+if st.session_state.sf_connected:
+    st.success(f"✅ Connected — {len(st.session_state.sobjects)} objects loaded")
+else:
+    col1, col2 = st.columns(2)
+    with col1:
+        sf_username = st.text_input("Username", placeholder="user@sdo.org")
+        sf_password = st.text_input("Password", type="password")
+    with col2:
+        sf_token    = st.text_input("Security Token", type="password")
+        sf_instance = st.text_input("Instance URL", placeholder="https://yourorg.my.salesforce.com")
 
-    if st.session_state.sf is None:
-        if st.button("🔌 Connect to Salesforce Org"):
+    if st.button("Connect to Salesforce"):
+        if not all([sf_username, sf_password, sf_token, sf_instance]):
+            st.error("All four fields are required.")
+        else:
             with st.spinner("Connecting..."):
-                sf = get_sf_connection()
-                if sf:
-                    st.session_state.sf = sf
-                    st.session_state.sobjects = get_sobject_list(sf)
-                    st.success(f"Connected · {len(st.session_state.sobjects)} objects loaded")
+                try:
+                    client  = SalesforceClient(sf_username, sf_password, sf_token, sf_instance)
+                    objects = client.get_sobject_list()
+                    st.session_state.sf_client    = client
+                    st.session_state.sobjects     = objects
+                    st.session_state.sf_connected = True
                     st.rerun()
+                except Exception as e:
+                    st.error(f"Connection failed: {e}")
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── STEP 2: RAG ───────────────────────────────────────────────────────────────
+if st.session_state.sf_connected:
+    st.markdown('<div class="step-label">Step 02 — Load Best Practices</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+
+    if st.session_state.rag_ready:
+        st.success("✅ Knowledge base ready")
     else:
-        st.success(f"✓ Connected · {len(st.session_state.sobjects)} objects available")
-        if st.button("Disconnect", type="secondary"):
-            st.session_state.sf = None
-            st.session_state.sobjects = []
-            st.session_state.schema = None
-            st.rerun()
+        uploaded_files = st.file_uploader("Upload best practices docs (optional)", type=["txt","md"], accept_multiple_files=True)
+        if st.button("Load Knowledge Base"):
+            with st.spinner("Embedding documents..."):
+                try:
+                    rag = RAGEngine()
+                    if uploaded_files:
+                        for f in uploaded_files:
+                            rag.add_document(f.name, f.read().decode("utf-8"))
+                    else:
+                        rag.load_defaults()
+                    st.session_state.rag_engine = rag
+                    st.session_state.rag_ready  = True
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"RAG setup failed: {e}")
+        st.caption("No docs? Click Load to use built-in Salesforce best practices.")
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Step 2: Pick Object ───────────────────────────────────────────────────
-    st.markdown('<div class="step-label">Step 2 · Select Object</div>', unsafe_allow_html=True)
+# ── STEP 3: GENERATE ──────────────────────────────────────────────────────────
+if st.session_state.sf_connected and st.session_state.rag_ready:
+    st.markdown('<div class="step-label">Step 03 — Generate Code</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
 
-    if st.session_state.sobjects:
-        selected_object = st.selectbox(
-            "SObject",
-            options=["— select —"] + st.session_state.sobjects,
-            label_visibility="collapsed",
-        )
+    col_left, col_right = st.columns([3, 2])
 
-        if selected_object and selected_object != "— select —":
-            if st.button("Fetch Schema"):
-                with st.spinner(f"Fetching {selected_object} schema..."):
-                    schema = get_object_schema(st.session_state.sf, selected_object)
-                    if schema:
-                        st.session_state.schema = schema
-                        st.success(f"✓ {len(schema['fields'])} fields loaded")
-    else:
-        st.info("Connect to your org first")
+    with col_left:
+        requirement = st.text_area("Requirement", placeholder="e.g. When an Opportunity is closed won, create a follow-up Task assigned to the owner due 3 days later.", height=120)
 
-    # Schema preview
+    with col_right:
+        object_names = [o["name"] for o in st.session_state.sobjects]
+        selected_obj = st.selectbox("SObject", options=["— select —"] + object_names)
+
+        if selected_obj and selected_obj != "— select —":
+            if st.session_state.selected_object != selected_obj:
+                with st.spinner(f"Fetching {selected_obj} schema..."):
+                    try:
+                        schema = st.session_state.sf_client.get_object_schema(selected_obj)
+                        st.session_state.schema          = schema
+                        st.session_state.selected_object = selected_obj
+                    except Exception as e:
+                        st.error(f"Schema fetch failed: {e}")
+
+        if st.session_state.schema:
+            st.caption(f"↳ {len(st.session_state.schema.get('fields', []))} fields loaded")
+
     if st.session_state.schema:
-        with st.expander(f"📋 {st.session_state.schema['name']} schema preview"):
-            fields = st.session_state.schema["fields"][:20]
-            chips = "".join([
-                f'<span class="schema-chip">{f["name"]} <span style="color:#64748b">({f["type"]})</span></span>'
-                for f in fields
-            ])
-            if len(st.session_state.schema["fields"]) > 20:
-                chips += f'<span class="schema-chip" style="color:#64748b">+{len(st.session_state.schema["fields"])-20} more</span>'
-            st.markdown(chips, unsafe_allow_html=True)
+        with st.expander(f"📋 {selected_obj} schema preview"):
+            fields = st.session_state.schema.get("fields", [])[:20]
+            for f in fields:
+                st.caption(f"`{f['name']}` ({f['type']}) — {f.get('label','')}")
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    groq_key = st.text_input("Groq API Key", type="password", help="Get free key at console.groq.com")
 
-    # ── Step 3: Requirement ───────────────────────────────────────────────────
-    st.markdown('<div class="step-label">Step 3 · Describe Requirement</div>', unsafe_allow_html=True)
+    if st.button("⚡ Generate Code"):
+        if not requirement.strip():
+            st.error("Enter a requirement.")
+        elif not st.session_state.schema:
+            st.error("Select an SObject.")
+        elif not groq_key.strip():
+            st.error("Enter your Groq API key.")
+        else:
+            with st.spinner("Retrieving best practices..."):
+                context = st.session_state.rag_engine.query(requirement)
+            with st.spinner("Generating Apex via Groq (Llama 3.1 70B)..."):
+                try:
+                    gen    = CodeGenerator(groq_key.strip())
+                    result = gen.generate(
+                        requirement=requirement,
+                        sobject=selected_obj,
+                        schema=st.session_state.schema,
+                        best_practices_context=context,
+                    )
+                    st.session_state.generated = result
+                except Exception as e:
+                    st.error(f"Generation failed: {e}")
 
-    requirement = st.text_area(
-        "Requirement",
-        placeholder="e.g. When an Opportunity is closed-won, automatically create a follow-up Task assigned to the owner with a due date 7 days from today.",
-        height=140,
-        label_visibility="collapsed",
-    )
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
+# ── OUTPUT ────────────────────────────────────────────────────────────────────
+if st.session_state.generated:
+    g = st.session_state.generated
+    st.markdown('<div class="step-label">Output — Generated Code</div>', unsafe_allow_html=True)
 
-    # ── Generate ──────────────────────────────────────────────────────────────
-    can_generate = (
-        st.session_state.sf is not None
-        and st.session_state.schema is not None
-        and requirement.strip() != ""
-    )
+    tab1, tab2, tab3, tab4 = st.tabs(["⚡ Trigger", "🔧 Handler Class", "🧪 Test Class", "📝 Notes"])
+    selected_obj = st.session_state.selected_object or "Object"
 
-    if st.button("⚡ Generate Apex Code", disabled=not can_generate):
-        with st.spinner("Fetching best practices..."):
-            best_practices = retrieve_best_practices(requirement)
+    with tab1:
+        st.code(g.get("trigger",""), language="java")
+        st.download_button("Download Trigger", g.get("trigger",""), file_name=f"{selected_obj}Trigger.trigger", mime="text/plain")
+    with tab2:
+        st.code(g.get("handler",""), language="java")
+        st.download_button("Download Handler", g.get("handler",""), file_name=f"{selected_obj}TriggerHandler.cls", mime="text/plain")
+    with tab3:
+        st.code(g.get("test_class",""), language="java")
+        st.download_button("Download Test Class", g.get("test_class",""), file_name=f"{selected_obj}TriggerHandlerTest.cls", mime="text/plain")
+    with tab4:
+        notes = g.get("notes","")
+        if notes:
+            st.info(notes)
 
-        with st.spinner("Generating Trigger · Handler · Test Class..."):
-            schema_text = format_schema_for_prompt(st.session_state.schema)
-            raw_output = generate_apex_code(requirement, schema_text, best_practices)
-            st.session_state.generated = parse_code_sections(raw_output)
-
-        st.success("✓ Code generated")
+    if st.button("🔄 New Generation"):
+        st.session_state.generated = None
+        st.session_state.selected_object = None
+        st.session_state.schema = None
         st.rerun()
-
-    if not can_generate and requirement.strip():
-        if st.session_state.sf is None:
-            st.caption("⚠ Connect to org first")
-        elif st.session_state.schema is None:
-            st.caption("⚠ Fetch object schema first")
-
-# ── Right column: Output ──────────────────────────────────────────────────────
-with right_col:
-    st.markdown('<div class="step-label">Output · Generated Apex</div>', unsafe_allow_html=True)
-
-    if st.session_state.generated:
-        sections = st.session_state.generated
-        tab1, tab2, tab3 = st.tabs([
-            "⚡ Trigger",
-            "🔧 Handler Class",
-            "🧪 Test Class",
-        ])
-
-        with tab1:
-            if sections["trigger"]:
-                st.code(sections["trigger"], language="apex")
-                st.download_button(
-                    "↓ Download .trigger",
-                    data=sections["trigger"],
-                    file_name=f"{st.session_state.schema['name']}Trigger.trigger",
-                    mime="text/plain",
-                )
-            else:
-                st.info("Trigger section not found in output")
-
-        with tab2:
-            if sections["handler"]:
-                st.code(sections["handler"], language="apex")
-                st.download_button(
-                    "↓ Download Handler.cls",
-                    data=sections["handler"],
-                    file_name=f"{st.session_state.schema['name']}TriggerHandler.cls",
-                    mime="text/plain",
-                )
-            else:
-                st.info("Handler section not found in output")
-
-        with tab3:
-            if sections["test"]:
-                st.code(sections["test"], language="apex")
-                st.download_button(
-                    "↓ Download Test.cls",
-                    data=sections["test"],
-                    file_name=f"{st.session_state.schema['name']}TriggerHandlerTest.cls",
-                    mime="text/plain",
-                )
-            else:
-                st.info("Test class section not found in output")
-
-    else:
-        # Empty state
-        st.markdown("""
-        <div style="
-            border: 1px dashed #1e2d45;
-            border-radius: 8px;
-            padding: 4rem 2rem;
-            text-align: center;
-            margin-top: 1rem;
-        ">
-            <div style="font-size: 2.5rem; margin-bottom: 1rem;">⚡</div>
-            <div style="font-family: 'IBM Plex Mono', monospace; color: #64748b; font-size: 0.85rem;">
-                Connect → Select Object → Describe Requirement → Generate
-            </div>
-            <div style="color: #374151; font-size: 0.8rem; margin-top: 0.5rem;">
-                Your Trigger, Handler, and Test Class will appear here
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-# ── Footer ────────────────────────────────────────────────────────────────────
-st.markdown("<br><br>", unsafe_allow_html=True)
-st.markdown("""
-<div style="border-top: 1px solid #1e2d45; padding-top: 1rem; display: flex; justify-content: space-between; align-items: center;">
-    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; color: #374151;">
-        SF Coding Agent · Infoglen AI CoE · POC v1.0
-    </span>
-    <span style="font-size: 0.7rem; color: #374151;">
-        Groq · Llama 3.1 70B · Chroma · Streamlit
-    </span>
-</div>
-""", unsafe_allow_html=True)
