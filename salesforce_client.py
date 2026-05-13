@@ -1,96 +1,78 @@
+"""
+Salesforce connectivity layer.
+Uses simple-salesforce to connect via Username + Password + Security Token.
+"""
+
 from simple_salesforce import Salesforce
-import streamlit as st
+from typing import List, Dict, Any
 
-def get_sf_connection():
-    """Establish Salesforce connection using Streamlit secrets."""
-    try:
-        sf = Salesforce(
-            username=st.secrets["SF_USERNAME"],
-            password=st.secrets["SF_PASSWORD"],
-            security_token=st.secrets["SF_SECURITY_TOKEN"],
-            domain=st.secrets.get("SF_DOMAIN", "login")
+EXCLUDED_PREFIXES = (
+    "Ai","Auth","Async","Apex","Background","Batch","Connected","Custom",
+    "Dashboard","Data","Duplicate","Email","Entity","Event","External","Feed",
+    "Flow","Flex","Group","History","Individual","Knowledge","Lightning","List",
+    "Login","Macro","Metric","My","Named","Network","Note","Org","Package",
+    "Permission","Platform","Process","Profile","Queue","Quick","Recent",
+    "Record","Report","Role","Search","Set","Site","Skill","Stamp","Static",
+    "Stream","Tag","Territory","Trigger","User","View","Visualforce","Wave",
+    "Web","Workflow",
+)
+
+USEFUL_OBJECTS = {
+    "Account","Contact","Opportunity","Lead","Case","Campaign","Contract",
+    "Order","Product2","Pricebook2","PricebookEntry","OpportunityLineItem",
+    "Quote","Asset","ServiceAppointment","WorkOrder","Solution",
+}
+
+
+class SalesforceClient:
+    def __init__(self, username: str, password: str, security_token: str, instance_url: str):
+        self.sf = Salesforce(
+            username=username,
+            password=password,
+            security_token=security_token,
+            instance_url=instance_url.rstrip("/"),
+            version="62.0",
         )
-        return sf
-    except Exception as e:
-        st.error(f"Salesforce connection failed: {str(e)}")
-        return None
 
-def get_sobject_list(sf):
-    """Fetch all queryable, createable SObjects from the org."""
-    try:
-        describe = sf.describe()
-        objects = [
-            obj["name"]
-            for obj in describe["sobjects"]
-            if obj["queryable"] and obj["createable"]
-        ]
-        return sorted(objects)
-    except Exception as e:
-        st.error(f"Failed to fetch SObject list: {str(e)}")
-        return []
+    def get_sobject_list(self) -> List[Dict[str, str]]:
+        result   = self.sf.describe()
+        filtered = []
+        for obj in result["sobjects"]:
+            name = obj.get("name","")
+            if not obj.get("triggerable") or not obj.get("queryable"):
+                continue
+            if "__" in name and not name.endswith("__c"):
+                continue
+            is_custom   = name.endswith("__c")
+            is_useful   = name in USEFUL_OBJECTS
+            is_excluded = any(name.startswith(p) for p in EXCLUDED_PREFIXES)
+            if is_custom or is_useful or not is_excluded:
+                filtered.append({"name": name, "label": obj.get("label",""), "is_custom": is_custom})
+        filtered.sort(key=lambda x: (not x["is_custom"], x["name"].lower()))
+        return filtered
 
-def get_object_schema(sf, object_name):
-    """Fetch full schema for a given SObject — fields, types, relationships."""
-    try:
-        obj_describe = getattr(sf, object_name).describe()
-
-        fields = []
-        for f in obj_describe["fields"]:
-            field_info = {
-                "name": f["name"],
-                "label": f["label"],
-                "type": f["type"],
-                "required": not f["nillable"] and not f["defaultedOnCreate"],
+    def get_object_schema(self, object_name: str) -> Dict[str, Any]:
+        describe = getattr(self.sf, object_name).describe()
+        fields   = []
+        for f in describe["fields"]:
+            fi = {
+                "name":       f["name"],
+                "label":      f["label"],
+                "type":       f["type"],
+                "required":   not f["nillable"] and not f["defaultedOnCreate"],
                 "updateable": f["updateable"],
                 "createable": f["createable"],
             }
-            # Capture relationship name for lookups
-            if f["type"] in ("reference", "lookup") and f.get("relationshipName"):
-                field_info["relationshipName"] = f["relationshipName"]
-                field_info["referenceTo"] = f.get("referenceTo", [])
-            fields.append(field_info)
-
-        relationships = [
-            {
-                "name": r["relationshipName"],
-                "childSObject": r["childSObject"],
-                "field": r["field"],
-            }
-            for r in obj_describe.get("childRelationships", [])
-            if r["relationshipName"]
-        ]
-
+            if f["type"] in ("reference","masterrecord"):
+                refs = f.get("referenceTo",[])
+                if refs:
+                    fi["referenceTo"] = refs
+            fields.append(fi)
         return {
-            "name": object_name,
-            "label": obj_describe["label"],
-            "fields": fields,
-            "childRelationships": relationships[:10],  # cap for context window
+            "name":        describe["name"],
+            "label":       describe["label"],
+            "fields":      fields,
+            "keyPrefix":   describe.get("keyPrefix",""),
+            "custom":      describe.get("custom", False),
+            "triggerable": describe.get("triggerable", False),
         }
-    except Exception as e:
-        st.error(f"Failed to fetch schema for {object_name}: {str(e)}")
-        return None
-
-def format_schema_for_prompt(schema):
-    """Convert schema dict into a concise string for the LLM prompt."""
-    if not schema:
-        return ""
-
-    lines = [
-        f"Object: {schema['name']} ({schema['label']})",
-        "",
-        "Fields:",
-    ]
-    for f in schema["fields"]:
-        req = "REQUIRED" if f["required"] else "optional"
-        ref = ""
-        if "referenceTo" in f:
-            ref = f" → {', '.join(f['referenceTo'])}"
-        lines.append(f"  - {f['name']} ({f['type']}, {req}){ref}")
-
-    if schema["childRelationships"]:
-        lines.append("")
-        lines.append("Child Relationships:")
-        for r in schema["childRelationships"]:
-            lines.append(f"  - {r['childSObject']} via {r['field']} [{r['name']}]")
-
-    return "\n".join(lines)
