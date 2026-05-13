@@ -1,153 +1,119 @@
-import chromadb
-from chromadb.utils import embedding_functions
-import os
+"""
+RAG Engine — embeds best practices docs and retrieves relevant chunks.
+Uses sentence-transformers (all-MiniLM-L6-v2) — no API key needed.
+"""
 
-# Built-in best practices — no external file dependency for POC
-BEST_PRACTICES = [
-    {
-        "id": "bp_001",
-        "text": """Apex Trigger Best Practices:
-- One trigger per object. Never write logic directly in the trigger body.
-- Always use a TriggerHandler class to separate logic from the trigger.
-- Bulkify all trigger logic — assume 200 records in every context.
-- Use trigger context variables: Trigger.new, Trigger.old, Trigger.newMap, Trigger.oldMap.
-- Never write SOQL or DML inside a for loop — always collect IDs, query outside, then process.
-- Use Trigger.isBefore / Trigger.isAfter / Trigger.isInsert / Trigger.isUpdate guards.
-- Example trigger structure:
-  trigger AccountTrigger on Account (before insert, before update, after insert, after update) {
-      AccountTriggerHandler handler = new AccountTriggerHandler();
-      if (Trigger.isBefore) {
-          if (Trigger.isInsert) handler.onBeforeInsert(Trigger.new);
-          if (Trigger.isUpdate) handler.onBeforeUpdate(Trigger.new, Trigger.oldMap);
-      }
-      if (Trigger.isAfter) {
-          if (Trigger.isInsert) handler.onAfterInsert(Trigger.new);
-          if (Trigger.isUpdate) handler.onAfterUpdate(Trigger.new, Trigger.oldMap);
-      }
-  }"""
-    },
-    {
-        "id": "bp_002",
-        "text": """Apex TriggerHandler Class Pattern:
-- The handler class contains all business logic called from the trigger.
-- Methods map 1:1 to trigger contexts: onBeforeInsert, onBeforeUpdate, onAfterInsert, onAfterUpdate.
-- Delegate to service classes for complex logic — the handler is an orchestrator, not a processor.
-- Example handler structure:
-  public class AccountTriggerHandler {
-      public void onBeforeInsert(List<Account> newAccounts) {
-          AccountService.populateDefaults(newAccounts);
-      }
-      public void onAfterInsert(List<Account> newAccounts) {
-          AccountService.createRelatedRecords(newAccounts);
-      }
-  }"""
-    },
-    {
-        "id": "bp_003",
-        "text": """Apex Service Class Pattern:
-- Service classes contain reusable business logic.
-- All methods should be static unless state management is required.
-- Accept lists of SObjects, not single records — always bulk-safe.
-- Service classes call selector/repository classes for SOQL, never inline queries.
-- Example: AccountService.cls with static methods like updateAccountRatings(List<Account> accounts)"""
-    },
-    {
-        "id": "bp_004",
-        "text": """Apex Governor Limits — Critical Rules:
-- SOQL limit: 100 queries per transaction. Never query inside a loop.
-- DML limit: 150 statements per transaction. Collect records in a list, DML once.
-- Heap size: 6MB (sync) / 12MB (async). Avoid storing large collections unnecessarily.
-- CPU time: 10,000ms (sync). Move heavy processing to Queueable or Batch Apex.
-- Pattern for bulk-safe SOQL:
-  Set<Id> accountIds = new Set<Id>();
-  for (Opportunity opp : triggerNew) { accountIds.add(opp.AccountId); }
-  Map<Id, Account> accountMap = new Map<Id, Account>(
-      [SELECT Id, Name FROM Account WHERE Id IN :accountIds]
-  );"""
-    },
-    {
-        "id": "bp_005",
-        "text": """Apex Test Class Best Practices:
-- Minimum 75% code coverage required for deployment; target 90%+.
-- Use @isTest annotation on the class and each test method.
-- Use Test.startTest() and Test.stopTest() to reset governor limits.
-- Create test data inside the test — never rely on org data.
-- Use System.assert(), System.assertEquals(), System.assertNotEquals() for assertions.
-- Test both positive (happy path) and negative (error/exception) scenarios.
-- Use @TestSetup for shared test data across multiple test methods.
-- Example structure:
-  @isTest
-  private class AccountTriggerHandlerTest {
-      @TestSetup
-      static void setupData() {
-          Account acc = new Account(Name = 'Test Account');
-          insert acc;
-      }
-      @isTest
-      static void testOnBeforeInsert_populatesDefaults() {
-          Test.startTest();
-          Account acc = new Account(Name = 'New Account');
-          insert acc;
-          Test.stopTest();
-          Account result = [SELECT Id, Rating FROM Account WHERE Id = :acc.Id];
-          System.assertNotEquals(null, result.Rating, 'Rating should be populated');
-      }
-  }"""
-    },
-    {
-        "id": "bp_006",
-        "text": """Apex Security Best Practices:
-- Always enforce CRUD and FLS using with sharing or inherited sharing on classes.
-- Use WITH SECURITY_ENFORCED in SOQL or Security.stripInaccessible() for FLS.
-- Never expose sensitive fields directly; use wrapper classes for API responses.
-- Declare classes as: public with sharing class MyClass for user-context operations.
-- For system-level operations (integrations, batch), use: public without sharing class MyClass with explicit justification in comments."""
-    },
-    {
-        "id": "bp_007",
-        "text": """Apex Naming Conventions:
-- Trigger: ObjectNameTrigger.trigger (e.g. AccountTrigger)
-- Handler: ObjectNameTriggerHandler.cls (e.g. AccountTriggerHandler)
-- Service: ObjectNameService.cls (e.g. AccountService)
-- Test class: ClassNameTest.cls (e.g. AccountTriggerHandlerTest)
-- Constants: Use ALL_CAPS_WITH_UNDERSCORES
-- Methods: camelCase, verb-first (e.g. populateDefaults, createRelatedRecords)
-- Variables: camelCase (e.g. newAccountList, accountMap)"""
-    },
-]
+from typing import List
+import numpy as np
 
-_chroma_client = None
-_collection = None
+DEFAULT_BEST_PRACTICES = """
+# Apex Trigger Best Practices
 
-def _init_chroma():
-    global _chroma_client, _collection
-    if _collection is not None:
-        return _collection
+## One Trigger Per Object
+Always write one trigger per SObject. Never put business logic directly in the trigger.
+Use a handler class to keep triggers thin and testable.
 
-    _chroma_client = chromadb.Client()
-    ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name="all-MiniLM-L6-v2"
-    )
-    _collection = _chroma_client.get_or_create_collection(
-        name="sf_best_practices",
-        embedding_function=ef,
-    )
+trigger OpportunityTrigger on Opportunity (before insert, before update, after insert, after update) {
+    OpportunityTriggerHandler handler = new OpportunityTriggerHandler();
+    if (Trigger.isBefore) {
+        if (Trigger.isInsert) handler.onBeforeInsert(Trigger.new);
+        if (Trigger.isUpdate) handler.onBeforeUpdate(Trigger.new, Trigger.oldMap);
+    }
+    if (Trigger.isAfter) {
+        if (Trigger.isInsert) handler.onAfterInsert(Trigger.new);
+        if (Trigger.isUpdate) handler.onAfterUpdate(Trigger.new, Trigger.oldMap);
+    }
+}
 
-    # Populate if empty
-    if _collection.count() == 0:
-        _collection.add(
-            documents=[bp["text"] for bp in BEST_PRACTICES],
-            ids=[bp["id"] for bp in BEST_PRACTICES],
-        )
+## Governor Limits
+Never put SOQL or DML inside a for loop. Always collect IDs first, query outside, then process.
 
-    return _collection
+## Handler Class Pattern
+public with sharing class OpportunityTriggerHandler {
+    public void onBeforeInsert(List<Opportunity> newList) {}
+    public void onBeforeUpdate(List<Opportunity> newList, Map<Id,Opportunity> oldMap) {}
+    public void onAfterInsert(List<Opportunity> newList) {}
+    public void onAfterUpdate(List<Opportunity> newList, Map<Id,Opportunity> oldMap) {}
+}
 
-def retrieve_best_practices(query: str, n_results: int = 3) -> str:
-    """Retrieve top-N relevant best practice chunks for a given query."""
-    collection = _init_chroma()
-    results = collection.query(
-        query_texts=[query],
-        n_results=min(n_results, len(BEST_PRACTICES)),
-    )
-    docs = results.get("documents", [[]])[0]
-    return "\n\n---\n\n".join(docs) if docs else ""
+## Security
+Use with sharing on handler classes. Enforce CRUD/FLS. Use WITH SECURITY_ENFORCED in SOQL.
+
+## Test Classes
+@isTest
+private class OpportunityTriggerHandlerTest {
+    @TestSetup
+    static void makeData() {
+        Account acc = new Account(Name = 'Test Account');
+        insert acc;
+    }
+    @isTest
+    static void testBulkInsert() {
+        Account acc = [SELECT Id FROM Account LIMIT 1];
+        List<Opportunity> opps = new List<Opportunity>();
+        for (Integer i = 0; i < 200; i++) {
+            opps.add(new Opportunity(Name='Test '+i, AccountId=acc.Id,
+                StageName='Prospecting', CloseDate=Date.today().addDays(30)));
+        }
+        Test.startTest();
+        insert opps;
+        Test.stopTest();
+    }
+}
+
+## Separation of Concerns
+Layer: Trigger (routing only) -> Handler (orchestration) -> Service (business logic) -> Selector (SOQL)
+
+## Custom Metadata Types
+Use CMTs for configuration values instead of hardcoded strings.
+
+## DML Best Practices
+Collect all records into lists, perform single DML at end.
+
+## Async Patterns
+Use Queueable for callouts from triggers, long-running operations, or chained jobs.
+"""
+
+
+class RAGEngine:
+    def __init__(self):
+        self.chunks: List[str] = []
+        self.embeddings: List[np.ndarray] = []
+        self._model = None
+
+    def _get_model(self):
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+        return self._model
+
+    def _chunk_text(self, text: str, chunk_size: int = 400, overlap: int = 40) -> List[str]:
+        words  = text.split()
+        chunks = []
+        start  = 0
+        while start < len(words):
+            chunks.append(" ".join(words[start:start + chunk_size]))
+            start += chunk_size - overlap
+        return chunks
+
+    def add_document(self, name: str, content: str):
+        model = self._get_model()
+        for chunk in self._chunk_text(content):
+            if len(chunk.strip()) > 20:
+                self.chunks.append(chunk)
+                self.embeddings.append(model.encode(chunk, convert_to_numpy=True))
+
+    def load_defaults(self):
+        self.add_document("defaults", DEFAULT_BEST_PRACTICES)
+
+    def query(self, query_text: str, top_k: int = 4) -> str:
+        if not self.chunks:
+            return ""
+        model  = self._get_model()
+        q_emb  = model.encode(query_text, convert_to_numpy=True)
+        scores = []
+        for emb in self.embeddings:
+            nq, ne = np.linalg.norm(q_emb), np.linalg.norm(emb)
+            scores.append(float(np.dot(q_emb, emb) / (nq * ne)) if nq and ne else 0.0)
+        top_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+        return "\n\n---\n\n".join(self.chunks[i] for i in top_idx)
