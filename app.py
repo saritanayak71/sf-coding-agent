@@ -89,11 +89,13 @@ if st.session_state.sf_connected:
 else:
     col1, col2 = st.columns(2)
     with col1:
-        sf_username = st.text_input("Username", placeholder="user@sdo.org")
-        sf_password = st.text_input("Password", type="password")
+        sf_username        = st.text_input("Username", placeholder="user@sdo.org")
+        sf_password        = st.text_input("Password", type="password")
+        sf_token           = st.text_input("Security Token", type="password")
     with col2:
-        sf_token    = st.text_input("Security Token", type="password")
-        sf_instance = st.text_input("Instance URL", placeholder="https://yourorg.my.salesforce.com")
+        sf_instance        = st.text_input("Instance URL", placeholder="https://yourorg.my.salesforce.com")
+        sf_consumer_key    = st.text_input("Consumer Key", type="password")
+        sf_consumer_secret = st.text_input("Consumer Secret", type="password")
 
     if st.button("Connect to Salesforce"):
         if not all([sf_username, sf_password, sf_token, sf_instance]):
